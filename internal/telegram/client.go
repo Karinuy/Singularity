@@ -44,6 +44,28 @@ func (c *Client) GetUpdates(ctx context.Context, offset int, timeoutSeconds int)
 	return updates, nil
 }
 
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	return c.SetMyCommandsForScope(ctx, commands, nil)
+}
+
+func (c *Client) SetMyCommandsForScope(ctx context.Context, commands []BotCommand, scope *BotCommandScope) error {
+	encoded, err := json.Marshal(commands)
+	if err != nil {
+		return err
+	}
+
+	values := url.Values{}
+	values.Set("commands", string(encoded))
+	if scope != nil {
+		encodedScope, err := json.Marshal(scope)
+		if err != nil {
+			return err
+		}
+		values.Set("scope", string(encodedScope))
+	}
+	return c.post(ctx, "setMyCommands", values, nil)
+}
+
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, replyToMessageID int) error {
 	_, err := c.SendMessageAndGet(ctx, chatID, text, replyToMessageID)
 	return err

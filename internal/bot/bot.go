@@ -36,6 +36,7 @@ func New(cfg config.Config, db *storage.DB, client *telegram.Client, logger *log
 
 func (s *Service) Run(ctx context.Context) error {
 	s.logger.Printf("starting bot")
+	s.registerBotCommands(ctx)
 
 	go s.runRSSPoller(ctx)
 	if s.cfg.VerificationEnabled {
@@ -65,6 +66,20 @@ func (s *Service) Run(ctx context.Context) error {
 				offset = update.UpdateID + 1
 			}
 			s.handleUpdate(ctx, update)
+		}
+	}
+}
+
+func (s *Service) registerBotCommands(ctx context.Context) {
+	commands := botCommands()
+	scopes := []*telegram.BotCommandScope{
+		nil,
+		{Type: "all_private_chats"},
+		{Type: "all_group_chats"},
+	}
+	for _, scope := range scopes {
+		if err := s.client.SetMyCommandsForScope(ctx, commands, scope); err != nil {
+			s.logger.Printf("set bot commands failed: %v", err)
 		}
 	}
 }
@@ -357,16 +372,28 @@ func (s *Service) handleCommand(ctx context.Context, message *telegram.Message, 
 			s.reply(ctx, message, "只有 Bot 创建者可以管理 RSS 订阅。")
 			return
 		}
+		if !s.isGroup(message.Chat) {
+			s.reply(ctx, message, "RSS 订阅只支持在群组内设置。请把 Bot 加入目标群组后，在群里执行该命令。")
+			return
+		}
 		s.addRSS(ctx, message, arg)
 	case "/rss_remove":
 		if !s.canManage(message) {
 			s.reply(ctx, message, "只有 Bot 创建者可以管理 RSS 订阅。")
 			return
 		}
+		if !s.isGroup(message.Chat) {
+			s.reply(ctx, message, "RSS 订阅只支持在群组内设置。请在目标群组里执行该命令。")
+			return
+		}
 		s.removeRSS(ctx, message, arg)
 	case "/rss_list":
 		if !s.canManage(message) {
 			s.reply(ctx, message, "只有 Bot 创建者可以查看 RSS 订阅。")
+			return
+		}
+		if !s.isGroup(message.Chat) {
+			s.reply(ctx, message, "RSS 订阅列表只支持在群组内查看。")
 			return
 		}
 		s.listRSS(ctx, message)
@@ -473,6 +500,10 @@ func (s *Service) pollRSS(ctx context.Context) {
 	}
 
 	for _, sub := range subs {
+		if !isGroupChatID(sub.ChatID) {
+			continue
+		}
+
 		feed, err := rss.Fetch(ctx, sub.FeedURL, s.cfg.HTTPTimeout)
 		if err != nil {
 			s.logger.Printf("fetch rss failed sub=%d url=%s err=%v", sub.ID, sub.FeedURL, err)
@@ -519,6 +550,10 @@ func (s *Service) reply(ctx context.Context, message *telegram.Message, text str
 
 func (s *Service) isGroup(chat telegram.Chat) bool {
 	return chat.Type == "group" || chat.Type == "supergroup"
+}
+
+func isGroupChatID(chatID int64) bool {
+	return chatID < 0
 }
 
 func (s *Service) canManage(message *telegram.Message) bool {
@@ -726,4 +761,15 @@ func helpText() string {
 		"/rss_list - 查看当前聊天订阅",
 		"/rss_check - 立即检查 RSS",
 	}, "\n")
+}
+
+func botCommands() []telegram.BotCommand {
+	return []telegram.BotCommand{
+		{Command: "start", Description: "Start the bot"},
+		{Command: "help", Description: "Show help"},
+		{Command: "rss_add", Description: "Add a group RSS subscription"},
+		{Command: "rss_remove", Description: "Remove a group RSS subscription"},
+		{Command: "rss_list", Description: "List group RSS subscriptions"},
+		{Command: "rss_check", Description: "Check RSS feeds now"},
+	}
 }

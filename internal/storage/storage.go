@@ -131,6 +131,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	if err := db.ensureColumn(ctx, "join_challenges", "verification_message_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM rss_subscriptions WHERE chat_id > 0;`); err != nil {
+		return err
+	}
 	return nil
 }
 
