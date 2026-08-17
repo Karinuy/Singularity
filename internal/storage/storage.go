@@ -33,13 +33,14 @@ type JoinEvent struct {
 }
 
 type VerificationChallenge struct {
-	ID        int64
-	ChatID    int64
-	UserID    int64
-	Question  string
-	Answer    int
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	ID                    int64
+	ChatID                int64
+	UserID                int64
+	Question              string
+	Answer                int
+	VerificationMessageID int
+	ExpiresAt             time.Time
+	CreatedAt             time.Time
 }
 
 func Open(path string) (*DB, error) {
@@ -127,7 +128,39 @@ func (db *DB) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := db.ensureColumn(ctx, "join_challenges", "verification_message_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (db *DB) ensureColumn(ctx context.Context, table string, column string, definition string) error {
+	rows, err := db.conn.QueryContext(ctx, "PRAGMA table_info("+table+");")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.conn.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition+";")
+	return err
 }
 
 func (db *DB) AddSubscription(ctx context.Context, chatID int64, feedURL string, title string, createdBy int64) (Subscription, error) {
@@ -282,7 +315,7 @@ func (db *DB) CreateVerificationChallenge(ctx context.Context, chatID int64, use
 
 func (db *DB) ActiveVerificationChallenge(ctx context.Context, chatID int64, userID int64, now time.Time) (VerificationChallenge, bool, error) {
 	row := db.conn.QueryRowContext(ctx, `
-		SELECT id, chat_id, user_id, question, answer, expires_at, created_at
+		SELECT id, chat_id, user_id, question, answer, verification_message_id, expires_at, created_at
 		FROM join_challenges
 		WHERE chat_id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?
 		ORDER BY id DESC
@@ -317,9 +350,27 @@ func (db *DB) MarkVerificationExpired(ctx context.Context, challengeID int64) er
 	return err
 }
 
+func (db *DB) MarkVerificationFailed(ctx context.Context, challengeID int64) error {
+	_, err := db.conn.ExecContext(ctx, `
+		UPDATE join_challenges
+		SET status = 'failed', resolved_at = ?
+		WHERE id = ? AND status = 'pending';
+	`, time.Now().UTC(), challengeID)
+	return err
+}
+
+func (db *DB) SetVerificationMessageID(ctx context.Context, challengeID int64, messageID int) error {
+	_, err := db.conn.ExecContext(ctx, `
+		UPDATE join_challenges
+		SET verification_message_id = ?
+		WHERE id = ?;
+	`, messageID, challengeID)
+	return err
+}
+
 func (db *DB) ExpiredVerificationChallenges(ctx context.Context, now time.Time, limit int) ([]VerificationChallenge, error) {
 	rows, err := db.conn.QueryContext(ctx, `
-		SELECT id, chat_id, user_id, question, answer, expires_at, created_at
+		SELECT id, chat_id, user_id, question, answer, verification_message_id, expires_at, created_at
 		FROM join_challenges
 		WHERE status = 'pending' AND expires_at <= ?
 		ORDER BY expires_at ASC
@@ -363,6 +414,7 @@ func scanVerificationChallenge(scanner verificationChallengeScanner) (Verificati
 		&challenge.UserID,
 		&challenge.Question,
 		&challenge.Answer,
+		&challenge.VerificationMessageID,
 		&challenge.ExpiresAt,
 		&challenge.CreatedAt,
 	)

@@ -70,6 +70,11 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) handleUpdate(ctx context.Context, update telegram.Update) {
+	if update.CallbackQuery != nil {
+		s.handleCallbackQuery(ctx, update.CallbackQuery)
+		return
+	}
+
 	message := update.Message
 	if message == nil {
 		message = update.EditedMessage
@@ -87,16 +92,6 @@ func (s *Service) handleUpdate(ctx context.Context, update telegram.Update) {
 		return
 	}
 
-	if s.cfg.VerificationEnabled && s.isGroup(message.Chat) && !s.isAdmin(message.From.ID) {
-		handled, err := s.handleVerificationResponse(ctx, message, body)
-		if err != nil {
-			s.logger.Printf("handle verification response failed: %v", err)
-		}
-		if handled {
-			return
-		}
-	}
-
 	if strings.HasPrefix(body, "/") {
 		s.handleCommand(ctx, message, body)
 		return
@@ -108,6 +103,8 @@ func (s *Service) handleUpdate(ctx context.Context, update telegram.Update) {
 }
 
 func (s *Service) handleNewMembers(ctx context.Context, message *telegram.Message) {
+	s.scheduleAutoDelete(ctx, message.Chat.ID, message.MessageID, s.cfg.AutoCleanupDelay)
+
 	for _, member := range message.NewChatMembers {
 		event := storage.JoinEvent{
 			ChatID:    message.Chat.ID,
@@ -132,7 +129,7 @@ func (s *Service) handleNewMembers(ctx context.Context, message *telegram.Messag
 		name := displayName(member)
 		if s.cfg.WelcomeMessage != "" {
 			text := fmt.Sprintf(s.cfg.WelcomeMessage, name)
-			if err := s.client.SendMessage(ctx, message.Chat.ID, text, message.MessageID); err != nil {
+			if _, err := s.sendAutoMessage(ctx, message.Chat.ID, text, message.MessageID); err != nil {
 				s.logger.Printf("send welcome failed: %v", err)
 			}
 		}
@@ -153,40 +150,81 @@ func (s *Service) startVerification(ctx context.Context, message *telegram.Messa
 		return
 	}
 
+	options, err := generateVerificationOptions(answer)
+	if err != nil {
+		s.logger.Printf("generate verification options failed: %v", err)
+		return
+	}
+
 	text := fmt.Sprintf(
-		"\u8bf7 %s \u5728 %s \u5185\u56de\u590d\u7b97\u672f\u9898\u7b54\u6848\u5b8c\u6210\u5165\u7fa4\u9a8c\u8bc1\uff1a\n%s",
+		"\u8bf7 %s \u5728 %s \u5185\u70b9\u51fb\u6b63\u786e\u7b54\u6848\u5b8c\u6210\u5165\u7fa4\u9a8c\u8bc1\uff1a\n%s",
 		displayName(member),
 		formatDurationForUser(s.cfg.VerificationTimeout),
 		challenge.Question,
 	)
-	if err := s.client.SendMessage(ctx, message.Chat.ID, text, message.MessageID); err != nil {
+	markup := verificationMarkup(challenge.ID, options)
+	sent, err := s.client.SendMessageWithMarkupAndGet(ctx, message.Chat.ID, text, message.MessageID, &markup)
+	if err != nil {
 		s.logger.Printf("send verification challenge failed: %v", err)
+		return
+	}
+	if err := s.db.SetVerificationMessageID(ctx, challenge.ID, sent.MessageID); err != nil {
+		s.logger.Printf("store verification message id failed: %v", err)
 	}
 }
 
-func (s *Service) handleVerificationResponse(ctx context.Context, message *telegram.Message, body string) (bool, error) {
-	challenge, ok, err := s.db.ActiveVerificationChallenge(ctx, message.Chat.ID, message.From.ID, time.Now().UTC())
-	if err != nil || !ok {
-		return false, err
+func (s *Service) handleCallbackQuery(ctx context.Context, query *telegram.CallbackQuery) {
+	if query.Message == nil || !strings.HasPrefix(query.Data, "join_verify:") {
+		return
 	}
 
-	answer, err := strconv.Atoi(strings.TrimSpace(body))
-	if err != nil || answer != challenge.Answer {
-		s.reply(ctx, message, "\u7b54\u6848\u4e0d\u6b63\u786e\uff0c\u8bf7\u76f4\u63a5\u56de\u590d\u7b97\u672f\u9898\u7684\u6570\u5b57\u7b54\u6848\u3002")
-		return true, nil
+	challengeID, choice, err := parseVerificationCallback(query.Data)
+	if err != nil {
+		s.answerCallback(ctx, query.ID, "\u9a8c\u8bc1\u6309\u94ae\u65e0\u6548\u3002", true)
+		return
+	}
+
+	challenge, ok, err := s.db.ActiveVerificationChallenge(ctx, query.Message.Chat.ID, query.From.ID, time.Now().UTC())
+	if err != nil {
+		s.logger.Printf("load verification challenge failed: %v", err)
+		s.answerCallback(ctx, query.ID, "\u9a8c\u8bc1\u5904\u7406\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", true)
+		return
+	}
+	if !ok {
+		s.answerCallback(ctx, query.ID, "\u9a8c\u8bc1\u5df2\u8fc7\u671f\u6216\u4e0d\u5b58\u5728\u3002", true)
+		return
+	}
+	if challenge.ID != challengeID {
+		s.answerCallback(ctx, query.ID, "\u8fd9\u4e0d\u662f\u4f60\u5f53\u524d\u7684\u9a8c\u8bc1\u9898\u3002", true)
+		return
+	}
+
+	if choice != challenge.Answer {
+		if err := s.db.MarkVerificationFailed(ctx, challenge.ID); err != nil {
+			s.logger.Printf("mark verification failed failed: %v", err)
+		}
+		s.deleteVerificationMessage(ctx, query.Message.Chat.ID, query.Message.MessageID, challenge.VerificationMessageID)
+		s.answerCallback(ctx, query.ID, "\u7b54\u6848\u9519\u8bef\uff0c\u5c06\u4e34\u65f6\u79fb\u51fa\u7fa4\u3002", true)
+		s.temporarilyBanForVerification(ctx, challenge.ChatID, challenge.UserID, "join verification wrong answer", "temporary_ban_wrong_answer")
+		return
 	}
 
 	if err := s.db.MarkVerificationPassed(ctx, challenge.ID); err != nil {
-		return true, err
+		s.logger.Printf("mark verification passed failed: %v", err)
+		s.answerCallback(ctx, query.ID, "\u9a8c\u8bc1\u5904\u7406\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", true)
+		return
 	}
 
-	name := displayName(*message.From)
+	s.answerCallback(ctx, query.ID, "\u9a8c\u8bc1\u901a\u8fc7\u3002", false)
+	s.deleteVerificationMessage(ctx, query.Message.Chat.ID, query.Message.MessageID, challenge.VerificationMessageID)
+	name := displayName(query.From)
 	passText := fmt.Sprintf("\u9a8c\u8bc1\u901a\u8fc7\uff0c\u6b22\u8fce %s\u3002", name)
 	if s.cfg.WelcomeMessage != "" {
 		passText = fmt.Sprintf(s.cfg.WelcomeMessage, name)
 	}
-	s.reply(ctx, message, passText)
-	return true, nil
+	if _, err := s.sendAutoMessage(ctx, challenge.ChatID, passText, 0); err != nil {
+		s.logger.Printf("send verification pass message failed: %v", err)
+	}
 }
 
 func (s *Service) runVerificationSweeper(ctx context.Context) {
@@ -216,16 +254,72 @@ func (s *Service) expirePendingVerifications(ctx context.Context) {
 			s.logger.Printf("mark verification expired failed: %v", err)
 			continue
 		}
+		if challenge.VerificationMessageID > 0 {
+			s.deleteMessage(ctx, challenge.ChatID, challenge.VerificationMessageID)
+		}
 		if !s.cfg.VerificationKickOnTimeout {
 			continue
 		}
-		if err := s.client.KickChatMember(ctx, challenge.ChatID, challenge.UserID); err != nil {
-			s.logger.Printf("kick verification timeout user failed: %v", err)
-			continue
+		s.temporarilyBanForVerification(ctx, challenge.ChatID, challenge.UserID, "join verification timeout", "temporary_ban_timeout")
+	}
+}
+
+func (s *Service) temporarilyBanForVerification(ctx context.Context, chatID int64, userID int64, reason string, action string) {
+	if err := s.client.TemporarilyBanChatMember(ctx, chatID, userID, s.cfg.VerificationBanDuration); err != nil {
+		s.logger.Printf("temporary ban verification user failed: %v", err)
+		return
+	}
+	if err := s.db.RecordModeration(ctx, chatID, userID, 0, reason, action); err != nil {
+		s.logger.Printf("record verification temporary ban failed: %v", err)
+	}
+}
+
+func (s *Service) answerCallback(ctx context.Context, callbackQueryID string, text string, showAlert bool) {
+	if err := s.client.AnswerCallbackQuery(ctx, callbackQueryID, text, showAlert); err != nil {
+		s.logger.Printf("answer callback query failed: %v", err)
+	}
+}
+
+func (s *Service) sendAutoMessage(ctx context.Context, chatID int64, text string, replyToMessageID int) (telegram.Message, error) {
+	sent, err := s.client.SendMessageAndGet(ctx, chatID, text, replyToMessageID)
+	if err != nil {
+		return telegram.Message{}, err
+	}
+	s.scheduleAutoDelete(ctx, chatID, sent.MessageID, s.cfg.AutoCleanupDelay)
+	return sent, nil
+}
+
+func (s *Service) scheduleAutoDelete(ctx context.Context, chatID int64, messageID int, delay time.Duration) {
+	if !s.cfg.AutoCleanupEnabled || messageID <= 0 || delay <= 0 {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			s.deleteMessage(ctx, chatID, messageID)
 		}
-		if err := s.db.RecordModeration(ctx, challenge.ChatID, challenge.UserID, 0, "join verification timeout", "kick"); err != nil {
-			s.logger.Printf("record verification timeout failed: %v", err)
-		}
+	}()
+}
+
+func (s *Service) deleteVerificationMessage(ctx context.Context, chatID int64, callbackMessageID int, storedMessageID int) {
+	messageID := storedMessageID
+	if messageID == 0 {
+		messageID = callbackMessageID
+	}
+	s.deleteMessage(ctx, chatID, messageID)
+}
+
+func (s *Service) deleteMessage(ctx context.Context, chatID int64, messageID int) {
+	if messageID <= 0 {
+		return
+	}
+	if err := s.client.DeleteMessage(ctx, chatID, messageID); err != nil {
+		s.logger.Printf("delete message failed chat=%d message=%d err=%v", chatID, messageID, err)
 	}
 }
 
@@ -260,21 +354,25 @@ func (s *Service) handleCommand(ctx context.Context, message *telegram.Message, 
 		s.reply(ctx, message, helpText())
 	case "/rss_add":
 		if !s.canManage(message) {
-			s.reply(ctx, message, "没有权限管理 RSS 订阅。")
+			s.reply(ctx, message, "只有 Bot 创建者可以管理 RSS 订阅。")
 			return
 		}
 		s.addRSS(ctx, message, arg)
 	case "/rss_remove":
 		if !s.canManage(message) {
-			s.reply(ctx, message, "没有权限管理 RSS 订阅。")
+			s.reply(ctx, message, "只有 Bot 创建者可以管理 RSS 订阅。")
 			return
 		}
 		s.removeRSS(ctx, message, arg)
 	case "/rss_list":
+		if !s.canManage(message) {
+			s.reply(ctx, message, "只有 Bot 创建者可以查看 RSS 订阅。")
+			return
+		}
 		s.listRSS(ctx, message)
 	case "/rss_check":
 		if !s.canManage(message) {
-			s.reply(ctx, message, "没有权限手动检查 RSS。")
+			s.reply(ctx, message, "只有 Bot 创建者可以手动检查 RSS。")
 			return
 		}
 		s.pollRSS(ctx)
@@ -414,7 +512,7 @@ func (s *Service) pollRSS(ctx context.Context) {
 }
 
 func (s *Service) reply(ctx context.Context, message *telegram.Message, text string) {
-	if err := s.client.SendMessage(ctx, message.Chat.ID, text, message.MessageID); err != nil {
+	if _, err := s.sendAutoMessage(ctx, message.Chat.ID, text, message.MessageID); err != nil {
 		s.logger.Printf("send reply failed: %v", err)
 	}
 }
@@ -427,10 +525,7 @@ func (s *Service) canManage(message *telegram.Message) bool {
 	if message.From == nil {
 		return false
 	}
-	if len(s.cfg.AdminUserIDs) == 0 {
-		return true
-	}
-	return s.cfg.AdminUserIDs[message.From.ID]
+	return s.cfg.OwnerUserID != 0 && message.From.ID == s.cfg.OwnerUserID
 }
 
 func (s *Service) isAdmin(userID int64) bool {
@@ -515,6 +610,85 @@ func generateArithmeticChallenge(maxValue int) (string, int, error) {
 		right = right%9 + 1
 		return fmt.Sprintf("%d * %d = ?", left, right), left * right, nil
 	}
+}
+
+func generateVerificationOptions(answer int) ([]int, error) {
+	options := map[int]bool{answer: true}
+	for len(options) < 4 {
+		offset, err := randomInt(21)
+		if err != nil {
+			return nil, err
+		}
+		offset -= 10
+		if offset == 0 {
+			continue
+		}
+		candidate := answer + offset
+		if candidate < 0 {
+			candidate = -candidate
+		}
+		options[candidate] = true
+	}
+
+	result := make([]int, 0, len(options))
+	for option := range options {
+		result = append(result, option)
+	}
+	if err := shuffleInts(result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func shuffleInts(values []int) error {
+	for i := len(values) - 1; i > 0; i-- {
+		j, err := randomInt(i + 1)
+		if err != nil {
+			return err
+		}
+		values[i], values[j] = values[j], values[i]
+	}
+	return nil
+}
+
+func verificationMarkup(challengeID int64, options []int) telegram.InlineKeyboardMarkup {
+	buttons := make([][]telegram.InlineKeyboardButton, 0, 2)
+	for i := 0; i < len(options); i += 2 {
+		row := []telegram.InlineKeyboardButton{
+			{
+				Text:         strconv.Itoa(options[i]),
+				CallbackData: verificationCallbackData(challengeID, options[i]),
+			},
+		}
+		if i+1 < len(options) {
+			row = append(row, telegram.InlineKeyboardButton{
+				Text:         strconv.Itoa(options[i+1]),
+				CallbackData: verificationCallbackData(challengeID, options[i+1]),
+			})
+		}
+		buttons = append(buttons, row)
+	}
+	return telegram.InlineKeyboardMarkup{InlineKeyboard: buttons}
+}
+
+func verificationCallbackData(challengeID int64, choice int) string {
+	return fmt.Sprintf("join_verify:%d:%d", challengeID, choice)
+}
+
+func parseVerificationCallback(data string) (int64, int, error) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 3 || parts[0] != "join_verify" {
+		return 0, 0, fmt.Errorf("invalid verification callback data")
+	}
+	challengeID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	choice, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, 0, err
+	}
+	return challengeID, choice, nil
 }
 
 func randomInt(maxValue int) (int, error) {

@@ -4,9 +4,10 @@ Singularity 是一个使用 Go、SQLite 和 Docker Compose 构建的 Telegram Bo
 
 ## 功能
 
-- 入群检测：记录新成员入群事件，并发送算术题验证。
-- 入群问答验证：新成员需要在群内回答算术题，超时默认移出群。
-- RSS 订阅：支持按聊天添加、移除、查看 RSS 订阅，并定时推送新条目。
+- 入群检测：记录新成员入群事件，并发送算术题按钮验证。
+- 入群问答验证：新成员需要点击群内按钮回答算术题，答错或超时会被临时移出群。
+- 自动消息清理：Bot 的入群验证题、欢迎消息、RSS 管理命令回复等自动消息会延迟删除，避免群聊天堆积。
+- RSS 订阅：支持按聊天添加、移除、查看 RSS 订阅，并定时把新条目发送到订阅所在群组或私聊。
 - 广告检测封禁：默认关闭；开启后检测广告关键词和链接密度，删除广告消息并封禁发送者。
 
 ## 快速启动
@@ -25,7 +26,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Bot 需要在群里拥有删除消息和封禁用户的管理员权限，广告封禁和验证超时移出才能生效。
+Bot 需要在群里拥有删除消息和封禁用户的管理员权限，自动清理、广告处置和验证超时移出才能生效。
 
 ## 命令
 
@@ -38,7 +39,13 @@ Bot 需要在群里拥有删除消息和封禁用户的管理员权限，广告�
 /rss_check
 ```
 
-如果配置了 `BOT_ADMIN_USER_IDS`，只有这些 Telegram 用户 ID 可以管理 RSS 订阅和手动触发检查。多个 ID 用英文逗号分隔。
+RSS 设置只允许 `BOT_OWNER_USER_ID` 指定的 Bot 创建者操作。`BOT_ADMIN_USER_IDS` 不授予 RSS 管理权限，只用于其他管理员白名单场景。
+
+## RSS 机制
+
+RSS 订阅按聊天维度保存。你在群组内执行 `/rss_add <url>`，后续新条目就会推送到这个群组；你在私聊执行，则推送到私聊。
+
+添加订阅时，Bot 会把当前已有条目标记为已读，避免历史内容刷屏。之后定时轮询时，只发送新条目。RSS 新文章推送默认不会自动删除。
 
 ## 配置
 
@@ -46,14 +53,18 @@ Bot 需要在群里拥有删除消息和封禁用户的管理员权限，广告�
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | 必填 | BotFather 提供的 Bot Token |
 | `DATABASE_PATH` | `data/singularity.db` | SQLite 数据库路径 |
-| `BOT_ADMIN_USER_IDS` | 空 | 允许管理 RSS 的用户 ID 列表 |
+| `BOT_OWNER_USER_ID` | 空 | Bot 创建者的 Telegram 用户 ID；只有该用户可以设置 RSS |
+| `BOT_ADMIN_USER_IDS` | 空 | 管理员白名单，当前用于广告检测豁免等非 RSS 管理场景 |
 | `BOT_RSS_POLL_INTERVAL` | `5m` | RSS 轮询间隔 |
 | `BOT_POLL_TIMEOUT_SECONDS` | `50` | Telegram long polling 超时秒数 |
-| `BOT_WELCOME_MESSAGE` | `欢迎 %s 入群。` | 入群欢迎文案，`%s` 会替换为用户名 |
+| `BOT_WELCOME_MESSAGE` | `Welcome %s.` | 入群欢迎文案，`%s` 会替换为用户名 |
+| `BOT_AUTO_CLEANUP_ENABLED` | `true` | 是否自动清理 Bot 自动消息和入群服务消息 |
+| `BOT_AUTO_CLEANUP_DELAY` | `2m` | 自动消息发送多久后删除 |
 | `BOT_VERIFICATION_ENABLED` | `true` | 是否启用入群算术题验证 |
-| `BOT_VERIFICATION_TIMEOUT` | `3m` | 新成员回答验证题的超时时间 |
+| `BOT_VERIFICATION_TIMEOUT` | `3m` | 新成员点击验证答案的超时时间 |
 | `BOT_VERIFICATION_MAX_VALUE` | `20` | 加减法题目的最大随机值，乘法会限制在 1 到 9 |
 | `BOT_VERIFICATION_KICK_ON_TIMEOUT` | `true` | 验证超时后是否移出群 |
+| `BOT_VERIFICATION_BAN_DURATION` | `300s` | 验证答错或超时后的临时封禁时长，不是永久封禁 |
 | `BOT_AD_DETECTION_ENABLED` | `false` | 是否启用广告检测和处置 |
 | `BOT_AD_KEYWORDS` | 内置广告词 | 逗号分隔的广告关键词 |
 | `BOT_AD_SCORE_THRESHOLD` | `3` | 广告判定分数阈值 |

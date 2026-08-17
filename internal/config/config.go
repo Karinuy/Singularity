@@ -11,15 +11,19 @@ import (
 type Config struct {
 	TelegramBotToken          string
 	DatabasePath              string
+	OwnerUserID               int64
 	AdminUserIDs              map[int64]bool
 	RSSPollInterval           time.Duration
 	PollTimeout               int
 	HTTPTimeout               time.Duration
 	WelcomeMessage            string
+	AutoCleanupEnabled        bool
+	AutoCleanupDelay          time.Duration
 	VerificationEnabled       bool
 	VerificationTimeout       time.Duration
 	VerificationMaxValue      int
 	VerificationKickOnTimeout bool
+	VerificationBanDuration   time.Duration
 	AdDetectionEnabled        bool
 	AdKeywords                []string
 	AdScoreThreshold          int
@@ -32,15 +36,19 @@ func Load() (Config, error) {
 	cfg := Config{
 		TelegramBotToken:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		DatabasePath:              envString("DATABASE_PATH", "data/singularity.db"),
+		OwnerUserID:               envInt64("BOT_OWNER_USER_ID", 0),
 		AdminUserIDs:              parseIDSet(os.Getenv("BOT_ADMIN_USER_IDS")),
 		RSSPollInterval:           envDuration("BOT_RSS_POLL_INTERVAL", 5*time.Minute),
 		PollTimeout:               envInt("BOT_POLL_TIMEOUT_SECONDS", 50),
 		HTTPTimeout:               envDuration("BOT_HTTP_TIMEOUT", 20*time.Second),
 		WelcomeMessage:            envString("BOT_WELCOME_MESSAGE", "\u6b22\u8fce %s \u5165\u7fa4\u3002"),
+		AutoCleanupEnabled:        envBool("BOT_AUTO_CLEANUP_ENABLED", true),
+		AutoCleanupDelay:          envDuration("BOT_AUTO_CLEANUP_DELAY", 2*time.Minute),
 		VerificationEnabled:       envBool("BOT_VERIFICATION_ENABLED", true),
 		VerificationTimeout:       envDuration("BOT_VERIFICATION_TIMEOUT", 3*time.Minute),
 		VerificationMaxValue:      envInt("BOT_VERIFICATION_MAX_VALUE", 20),
 		VerificationKickOnTimeout: envBool("BOT_VERIFICATION_KICK_ON_TIMEOUT", true),
+		VerificationBanDuration:   envDuration("BOT_VERIFICATION_BAN_DURATION", 300*time.Second),
 		AdDetectionEnabled:        envBool("BOT_AD_DETECTION_ENABLED", false),
 		AdKeywords:                parseList(envString("BOT_AD_KEYWORDS", defaultAdKeywords())),
 		AdScoreThreshold:          envInt("BOT_AD_SCORE_THRESHOLD", 3),
@@ -64,6 +72,12 @@ func Load() (Config, error) {
 	if cfg.VerificationMaxValue < 5 {
 		cfg.VerificationMaxValue = 5
 	}
+	if cfg.VerificationBanDuration < 30*time.Second {
+		cfg.VerificationBanDuration = 300 * time.Second
+	}
+	if cfg.AutoCleanupDelay < 10*time.Second {
+		cfg.AutoCleanupDelay = 10 * time.Second
+	}
 
 	return cfg, nil
 }
@@ -82,6 +96,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return fallback
 	}
