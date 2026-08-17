@@ -594,13 +594,16 @@ func normalizeFeedURL(value string) (string, error) {
 	return parsed.String(), nil
 }
 
-func formatRSSMessage(feedTitle string, item rss.Item) string {
-	lines := []string{"RSS 更新：" + firstNonEmpty(feedTitle, "未命名订阅")}
+func formatRSSMessage(_ string, item rss.Item) string {
+	lines := make([]string, 0, 2)
 	if item.Title != "" {
 		lines = append(lines, item.Title)
 	}
 	if item.Link != "" {
 		lines = append(lines, item.Link)
+	}
+	if len(lines) == 0 {
+		return item.Key
 	}
 	return strings.Join(lines, "\n")
 }
