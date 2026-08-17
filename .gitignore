@@ -1,0 +1,8 @@
+.env
+data/
+.cache/
+*.db
+*.db-shm
+*.db-wal
+singularity
+coverage.out

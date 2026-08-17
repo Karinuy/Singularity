@@ -1,0 +1,9 @@
+services:
+  singularity:
+    build: .
+    container_name: singularity-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
