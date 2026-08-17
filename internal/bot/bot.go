@@ -102,7 +102,7 @@ func (s *Service) handleUpdate(ctx context.Context, update telegram.Update) {
 		return
 	}
 
-	if s.isGroup(message.Chat) && !s.isAdmin(message.From.ID) {
+	if s.cfg.AdDetectionEnabled && s.isGroup(message.Chat) && !s.isAdmin(message.From.ID) {
 		s.handleModeration(ctx, message, body)
 	}
 }

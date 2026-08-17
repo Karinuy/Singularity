@@ -20,6 +20,7 @@ type Config struct {
 	VerificationTimeout       time.Duration
 	VerificationMaxValue      int
 	VerificationKickOnTimeout bool
+	AdDetectionEnabled        bool
 	AdKeywords                []string
 	AdScoreThreshold          int
 	AdLinkLimit               int
@@ -40,6 +41,7 @@ func Load() (Config, error) {
 		VerificationTimeout:       envDuration("BOT_VERIFICATION_TIMEOUT", 3*time.Minute),
 		VerificationMaxValue:      envInt("BOT_VERIFICATION_MAX_VALUE", 20),
 		VerificationKickOnTimeout: envBool("BOT_VERIFICATION_KICK_ON_TIMEOUT", true),
+		AdDetectionEnabled:        envBool("BOT_AD_DETECTION_ENABLED", false),
 		AdKeywords:                parseList(envString("BOT_AD_KEYWORDS", defaultAdKeywords())),
 		AdScoreThreshold:          envInt("BOT_AD_SCORE_THRESHOLD", 3),
 		AdLinkLimit:               envInt("BOT_AD_LINK_LIMIT", 2),

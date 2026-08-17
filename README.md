@@ -7,7 +7,7 @@ Singularity 是一个使用 Go、SQLite 和 Docker Compose 构建的 Telegram Bo
 - 入群检测：记录新成员入群事件，并发送算术题验证。
 - 入群问答验证：新成员需要在群内回答算术题，超时默认移出群。
 - RSS 订阅：支持按聊天添加、移除、查看 RSS 订阅，并定时推送新条目。
-- 广告检测封禁：检测广告关键词和链接密度，删除广告消息并封禁发送者。
+- 广告检测封禁：默认关闭；开启后检测广告关键词和链接密度，删除广告消息并封禁发送者。
 
 ## 快速启动
 
@@ -54,6 +54,7 @@ Bot 需要在群里拥有删除消息和封禁用户的管理员权限，广告�
 | `BOT_VERIFICATION_TIMEOUT` | `3m` | 新成员回答验证题的超时时间 |
 | `BOT_VERIFICATION_MAX_VALUE` | `20` | 加减法题目的最大随机值，乘法会限制在 1 到 9 |
 | `BOT_VERIFICATION_KICK_ON_TIMEOUT` | `true` | 验证超时后是否移出群 |
+| `BOT_AD_DETECTION_ENABLED` | `false` | 是否启用广告检测和处置 |
 | `BOT_AD_KEYWORDS` | 内置广告词 | 逗号分隔的广告关键词 |
 | `BOT_AD_SCORE_THRESHOLD` | `3` | 广告判定分数阈值 |
 | `BOT_AD_LINK_LIMIT` | `2` | 链接数量达到该值会增加广告分 |
