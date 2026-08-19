@@ -1,4 +1,4 @@
-# Singularity Telegram Bot
+# Singularity
 
 Singularity 是一个使用 Go、SQLite 和 Docker Compose 构建的 Telegram Bot。
 
